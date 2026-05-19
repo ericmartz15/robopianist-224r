@@ -1,0 +1,22 @@
+# Pinned dependencies for RoboPianist-224R
+# See DEPENDENCIES.md for detailed explanation of version constraints
+
+# Core numerical libraries (pin FIRST to prevent upgrades)
+numpy>=1.22,<2.0
+scipy>=1.9,<1.12
+
+# JAX ecosystem (must match exactly)
+jax==0.4.20
+jaxlib==0.4.20
+flax==0.7.5
+optax==0.1.7
+distrax==0.1.5
+
+# RoboPianist and MuJoCo
+robopianist>=1.0.6
+dm_env_wrappers
+
+# Training utilities
+wandb
+tyro
+tqdm
