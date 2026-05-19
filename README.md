@@ -1,4 +1,4 @@
-# robopianist-rl
+# Clone of robopianist-rl for a CS 224R project
 
 Reinforcement learning code for [RoboPianist](https://github.com/google-research/robopianist).
 
