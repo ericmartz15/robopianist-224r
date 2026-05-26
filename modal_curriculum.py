@@ -6,7 +6,9 @@ This runs the two-phase training:
 2. Fine-tune on NocturneRousseau
 
 Usage:
-    modal run modal_train_pretrain.py
+    modal run modal_curriculum.py                          # pretrain experiment (default)
+    modal run modal_curriculum.py --experiment baseline    # baseline only
+    modal run modal_curriculum.py --experiment both        # both in parallel
 """
 
 import modal
@@ -45,7 +47,7 @@ image = (
         "tqdm",
         "dm_env_wrappers",
     )
-    .add_local_file("train_pretrain.py", "/root/robopianist-rl/train_pretrain.py")
+    .add_local_file("train_curriculum.py", "/root/robopianist-rl/train_curriculum.py")
 )
 
 volume = modal.Volume.from_name("robopianist-results", create_if_missing=True)
@@ -59,18 +61,18 @@ wandb_secret = modal.Secret.from_name("wandb")
     timeout=86400,  # 24 hours (Modal maximum)
     secrets=[wandb_secret],
 )
-def train_pretrain_finetune(
+def train_curriculum(
     pretrain_steps: int = 500_000,
     finetune_steps: int = 500_000,
     scale_switch_interval: int = 50_000,
     seed: int = 42,
-    name: str = "pretrain-scales-finetune-nocturne",
+    name: str = "curriculum-scales-finetune-nocturne",
 ):
     import os
     os.chdir("/root/robopianist-rl")
-    
+
     subprocess.run([
-        "python", "train_pretrain.py",
+        "python", "train_curriculum.py",
         "--mode", "online",
         "--project", "robopianist-224r",
         "--name", name,
@@ -82,8 +84,16 @@ def train_pretrain_finetune(
         "--n_steps_lookahead", "10",
         "--tqdm_bar",
         "--root_dir", "/output",
+        "--discount", "0.8",
+        "--agent-config.critic-dropout-rate", "0.01",
+        "--agent-config.critic-layer-norm",
+        "--agent-config.hidden-dims", "256", "256", "256",
+        "--trim-silence",
+        "--reduced-action-space",
+        "--action-reward-observation",
+        "--primitive-fingertip-collisions",
     ], check=True)
-    
+
     volume.commit()
 
 
@@ -102,7 +112,7 @@ def train_baseline(
     """Train baseline without pretraining for comparison."""
     import os
     os.chdir("/root/robopianist-rl")
-    
+
     subprocess.run([
         "python", "train.py",
         "--mode", "online",
@@ -113,55 +123,67 @@ def train_baseline(
         "--gravity_compensation",
         "--n_steps_lookahead", "10",
         "--tqdm_bar",
+        "--discount", "0.8",
+        "--agent-config.critic-dropout-rate", "0.01",
+        "--agent-config.critic-layer-norm",
+        "--agent-config.hidden-dims", "256", "256", "256",
+        "--trim-silence",
+        "--reduced-action-space",
+        "--action-reward-observation",
+        "--primitive-fingertip-collisions",
+        "--root-dir", "/output",
     ], check=True)
-    
+
     volume.commit()
 
 
 @app.local_entrypoint()
-def main(
-    experiment: str = "pretrain",
+async def main(
+    experiment: str = "curriculum",
     pretrain_steps: int = 500_000,
     finetune_steps: int = 500_000,
     seed: int = 42,
 ):
     """
     Run experiments.
-    
+
     Args:
-        experiment: "pretrain" for scale pretraining experiment, 
+        experiment: "curriculum" for scale pretraining experiment,
                    "baseline" for no-pretraining baseline,
                    "both" to run both in parallel
         pretrain_steps: Number of steps for pretraining phase
         finetune_steps: Number of steps for fine-tuning phase
         seed: Random seed
     """
-    if experiment == "pretrain":
-        train_pretrain_finetune.remote(
+    import asyncio
+    total_steps = pretrain_steps + finetune_steps
+
+    if experiment == "curriculum":
+        await train_curriculum.remote.aio(
             pretrain_steps=pretrain_steps,
             finetune_steps=finetune_steps,
             seed=seed,
-            name=f"pretrain-scales-finetune-nocturne-seed{seed}",
+            name=f"curriculum-scales-finetune-nocturne-seed{seed}",
         )
     elif experiment == "baseline":
-        total_steps = pretrain_steps + finetune_steps
-        train_baseline.remote(
+        await train_baseline.remote.aio(
             max_steps=total_steps,
             seed=seed,
             name=f"baseline-nocturne-no-pretrain-seed{seed}",
         )
     elif experiment == "both":
-        total_steps = pretrain_steps + finetune_steps
-        train_pretrain_finetune.remote(
-            pretrain_steps=pretrain_steps,
-            finetune_steps=finetune_steps,
-            seed=seed,
-            name=f"pretrain-scales-finetune-nocturne-seed{seed}",
-        )
-        train_baseline.remote(
-            max_steps=total_steps,
-            seed=seed,
-            name=f"baseline-nocturne-no-pretrain-seed{seed}",
+        await asyncio.gather(
+            train_curriculum.remote.aio(
+                pretrain_steps=pretrain_steps,
+                finetune_steps=finetune_steps,
+                seed=seed,
+                name=f"curriculum-scales-finetune-nocturne-seed{seed}",
+            ),
+            train_baseline.remote.aio(
+                max_steps=total_steps,
+                seed=seed,
+                name=f"baseline-nocturne-no-pretrain-seed{seed}",
+            ),
         )
     else:
-        raise ValueError(f"Unknown experiment: {experiment}. Use 'pretrain', 'baseline', or 'both'")
+        raise ValueError(f"Unknown experiment: {experiment}. Use 'curriculum', 'baseline', or 'both'")
