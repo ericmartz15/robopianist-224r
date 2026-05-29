@@ -46,6 +46,12 @@ image = (
         "flax==0.7.5",
         "optax==0.1.7",
         "distrax==0.1.5",
+        # Pin mujoco + dm-control together: dm-control>=1.0.40 references
+        # flex_bandwidth which was removed in mujoco 3.9.0, causing an
+        # AttributeError at environment init. 1.0.39 is the last safe version;
+        # it requires mujoco>=3.7.0 and was designed for that combination.
+        "mujoco==3.7.0",
+        "dm-control==1.0.39",
         "robopianist>=1.0.6",
         "wandb",
         "tyro",
