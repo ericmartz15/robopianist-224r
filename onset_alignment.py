@@ -38,6 +38,7 @@ class OnsetAlignmentWrapper(wrappers.EnvironmentWrapper):
         self._step = 0
         self._prev_keys = None
         self._onset_steps = self._build_onset_steps(midi_seq, control_timestep)
+        self.last_bonus = 0.0  # exposed for per-step logging
 
     @staticmethod
     def _build_onset_steps(seq, dt: float) -> list:
@@ -71,6 +72,7 @@ class OnsetAlignmentWrapper(wrappers.EnvironmentWrapper):
                 if gaussians:
                     bonus = float(np.mean(gaussians))  # in [0, 1]
 
+        self.last_bonus = bonus
         self._prev_keys = keys
         self._step += 1
         return ts._replace(reward=ts.reward + self._alpha * bonus)

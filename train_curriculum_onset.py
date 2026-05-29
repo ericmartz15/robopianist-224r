@@ -96,6 +96,16 @@ def prefix_dict(prefix: str, d: dict) -> dict:
     return {f"{prefix}/{k}": v for k, v in d.items()}
 
 
+def get_onset_wrapper(env):
+    """Traverse the wrapper stack to find the OnsetAlignmentWrapper."""
+    e = env
+    while hasattr(e, "_environment"):
+        if isinstance(e, OnsetAlignmentWrapper):
+            return e
+        e = e._environment
+    return None
+
+
 def get_env(
     environment_name: str,
     args: Args,
@@ -208,6 +218,10 @@ def train_phase(
     timestep = env.reset()
     replay_buffer.insert(timestep, None)
 
+    onset_wrapper = get_onset_wrapper(env)
+    episode_onset_bonus = 0.0
+    episode_steps = 0
+
     start_time = time.time()
 
     for i in tqdm(range(1, num_steps + 1), disable=not args.tqdm_bar, desc=phase_name):
@@ -221,8 +235,22 @@ def train_phase(
         timestep = env.step(action)
         replay_buffer.insert(timestep, action)
 
+        if onset_wrapper is not None:
+            episode_onset_bonus += onset_wrapper.last_bonus
+            episode_steps += 1
+
         if timestep.last():
-            wandb.log(prefix_dict(f"{phase_name}/train", env.get_statistics()), step=global_step)
+            stats = env.get_statistics()
+            if onset_wrapper is not None and episode_steps > 0:
+                # Log onset bonus and the estimated pure-F1 reward separately.
+                # base_return ≈ total_return - alpha * cumulative_bonus
+                total_return = stats.get("episode_return", 0.0)
+                onset_contribution = args.onset_alpha * episode_onset_bonus
+                stats["onset_bonus_per_step"] = episode_onset_bonus / episode_steps
+                stats["base_f1_return"] = total_return - onset_contribution
+            wandb.log(prefix_dict(f"{phase_name}/train", stats), step=global_step)
+            episode_onset_bonus = 0.0
+            episode_steps = 0
             timestep = env.reset()
             replay_buffer.insert(timestep, None)
 

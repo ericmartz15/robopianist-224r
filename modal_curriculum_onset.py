@@ -102,7 +102,7 @@ def train_curriculum_onset(
 
 
 @app.local_entrypoint()
-async def main(
+def main(
     pretrain_steps: int = 500_000,
     finetune_steps: int = 500_000,
     seed: int = 42,
@@ -119,7 +119,9 @@ async def main(
         onset_alpha:    Weight of the onset bonus (default 0.1).
         onset_sigma:    Timing tolerance in timesteps (default 2.0 = ±100ms at 50ms/step).
     """
-    await train_curriculum_onset.remote.aio(
+    # .spawn() submits the job and returns immediately — no log streaming,
+    # no connection kept alive. Safe to close the terminal right after.
+    call = train_curriculum_onset.spawn(
         pretrain_steps=pretrain_steps,
         finetune_steps=finetune_steps,
         seed=seed,
@@ -127,3 +129,5 @@ async def main(
         onset_alpha=onset_alpha,
         onset_sigma=onset_sigma,
     )
+    print(f"Job submitted. Function call ID: {call.object_id}")
+    print("Monitor at https://modal.com/apps/j-oliver-choo/main/")
