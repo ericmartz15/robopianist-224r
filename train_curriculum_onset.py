@@ -1,12 +1,12 @@
 """
-Training script with scale pretraining followed by fine-tuning on NocturneRousseau,
-with temporal onset-alignment reward shaping.
+Training script: scale pretraining + NocturneRousseau fine-tuning,
+with temporal onset-alignment reward shaping and robust mid-run checkpointing.
 
-Identical to train_curriculum.py except get_env wraps the base environment with
-OnsetAlignmentWrapper before the rest of the wrapper stack.
+Combines onset-alignment reward (J. Choo) with phase-aware checkpoint/resume
+so Modal worker preemptions are handled automatically.
 
 Usage:
-    python train_curriculum_onset.py --pretrain_steps 500000 --finetune_steps 500000
+    python train_curriculum_onset.py --pretrain_steps 100000 --finetune_steps 400000
 """
 
 from pathlib import Path
@@ -45,8 +45,8 @@ TARGET_ENVIRONMENT = "RoboPianist-debug-NocturneRousseau-v0"
 class Args:
     root_dir: str = "/tmp/robopianist"
     seed: int = 42
-    pretrain_steps: int = 500_000
-    finetune_steps: int = 500_000
+    pretrain_steps: int = 100_000
+    finetune_steps: int = 400_000
     warmstart_steps: int = 5_000
     log_interval: int = 1_000
     eval_interval: int = 10_000
@@ -87,6 +87,7 @@ class Args:
     scale_switch_interval: int = 50_000
     clear_replay_on_finetune: bool = True
     finetune_warmstart_steps: int = 1_000
+    checkpoint_interval: int = 10_000
     # Onset-alignment hyperparameters
     onset_alpha: float = 0.1   # weight of onset bonus relative to F1 reward
     onset_sigma: float = 2.0   # timing tolerance in timesteps (1σ = sigma * control_timestep s)
@@ -171,25 +172,35 @@ def get_env(
     return env
 
 
-def save_checkpoint(agent: sac.SAC, path: Path) -> None:
-    """Save agent checkpoint to disk."""
+def save_checkpoint(
+    agent: sac.SAC,
+    path: Path,
+    phase: str,
+    pretrain_steps_done: int,
+    finetune_steps_done: int,
+) -> None:
+    """Atomically save agent + training state. Atomic write prevents corruption on preemption."""
     checkpoint = {
         "actor_params": agent.actor.params,
         "critic_params": agent.critic.params,
         "target_critic_params": agent.target_critic.params,
         "temp_params": agent.temp.params,
         "rng": agent.rng,
+        "phase": phase,
+        "pretrain_steps_done": pretrain_steps_done,
+        "finetune_steps_done": finetune_steps_done,
     }
-    with open(path, "wb") as f:
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "wb") as f:
         pickle.dump(checkpoint, f)
-    print(f"Saved checkpoint to {path}")
+    tmp_path.rename(path)
+    print(f"Checkpoint saved: phase={phase}, pretrain={pretrain_steps_done}, finetune={finetune_steps_done}")
 
 
-def load_checkpoint(agent: sac.SAC, path: Path) -> sac.SAC:
-    """Load agent checkpoint from disk."""
+def load_checkpoint(agent: sac.SAC, path: Path):
+    """Load agent + training state. Returns (agent, phase, pretrain_done, finetune_done)."""
     with open(path, "rb") as f:
         checkpoint = pickle.load(f)
-
     agent = agent.replace(
         actor=agent.actor.replace(params=checkpoint["actor_params"]),
         critic=agent.critic.replace(params=checkpoint["critic_params"]),
@@ -197,8 +208,11 @@ def load_checkpoint(agent: sac.SAC, path: Path) -> sac.SAC:
         temp=agent.temp.replace(params=checkpoint["temp_params"]),
         rng=checkpoint["rng"],
     )
-    print(f"Loaded checkpoint from {path}")
-    return agent
+    phase = checkpoint.get("phase", "pretrain")
+    pretrain_done = checkpoint.get("pretrain_steps_done", 0)
+    finetune_done = checkpoint.get("finetune_steps_done", 0)
+    print(f"Resumed from checkpoint: phase={phase}, pretrain={pretrain_done}, finetune={finetune_done}")
+    return agent, phase, pretrain_done, finetune_done
 
 
 def train_phase(
@@ -213,8 +227,10 @@ def train_phase(
     warmstart_steps: int,
     phase_name: str,
     experiment_dir: Path,
+    resume_from: int = 0,
+    save_fn=None,
 ) -> sac.SAC:
-    """Run a training phase."""
+    """Run a training phase, optionally resuming mid-phase from resume_from steps."""
     timestep = env.reset()
     replay_buffer.insert(timestep, None)
 
@@ -224,7 +240,7 @@ def train_phase(
 
     start_time = time.time()
 
-    for i in tqdm(range(1, num_steps + 1), disable=not args.tqdm_bar, desc=phase_name):
+    for i in tqdm(range(resume_from + 1, num_steps + 1), disable=not args.tqdm_bar, desc=phase_name):
         global_step = start_step + i
 
         if i < warmstart_steps:
@@ -235,6 +251,7 @@ def train_phase(
         timestep = env.step(action)
         replay_buffer.insert(timestep, action)
 
+        # Track onset bonus for per-episode logging.
         if onset_wrapper is not None:
             episode_onset_bonus += onset_wrapper.last_bonus
             episode_steps += 1
@@ -242,8 +259,6 @@ def train_phase(
         if timestep.last():
             stats = env.get_statistics()
             if onset_wrapper is not None and episode_steps > 0:
-                # Log onset bonus and the estimated pure-F1 reward separately.
-                # base_return ≈ total_return - alpha * cumulative_bonus
                 total_return = stats.get("episode_return", 0.0)
                 onset_contribution = args.onset_alpha * episode_onset_bonus
                 stats["onset_bonus_per_step"] = episode_onset_bonus / episode_steps
@@ -273,8 +288,13 @@ def train_phase(
             wandb.log({f"{phase_name}/video": video, "global_step": global_step})
             eval_env.latest_filename.unlink()
 
+        # Save checkpoint every checkpoint_interval steps.
+        if save_fn is not None and i % args.checkpoint_interval == 0:
+            save_fn(agent, i)
+
         if i % args.log_interval == 0:
-            wandb.log({f"{phase_name}/train/fps": int(i / (time.time() - start_time))}, step=global_step)
+            elapsed = time.time() - start_time
+            wandb.log({f"{phase_name}/train/fps": int((i - resume_from) / elapsed)}, step=global_step)
 
     return agent
 
@@ -285,43 +305,64 @@ def pretrain_on_scales(
     spec: specs.EnvironmentSpec,
     replay_buffer: replay.Buffer,
     experiment_dir: Path,
+    checkpoint_path: Path,
+    resume_pretrain_steps: int = 0,
 ) -> sac.SAC:
-    """Pretrain agent on scale environments, cycling through them."""
+    """Pretrain on scale environments, cycling through them. Supports mid-run resume."""
     print("\n" + "=" * 60)
     print("PHASE 1: PRETRAINING ON SCALES")
+    if resume_pretrain_steps > 0:
+        print(f"Resuming from step {resume_pretrain_steps}")
     print("=" * 60)
 
     num_scales = len(args.scale_environments)
     steps_per_scale = args.scale_switch_interval
-    total_cycles = args.pretrain_steps // (num_scales * steps_per_scale)
-
     current_step = 0
 
-    for cycle in range(total_cycles + 1):
+    for cycle in range(args.pretrain_steps // (num_scales * steps_per_scale) + 1):
         for scale_idx, scale_env_name in enumerate(args.scale_environments):
             if current_step >= args.pretrain_steps:
                 break
 
-            steps_this_round = min(
-                steps_per_scale,
-                args.pretrain_steps - current_step
-            )
-
+            steps_this_round = min(steps_per_scale, args.pretrain_steps - current_step)
             if steps_this_round <= 0:
                 break
 
+            segment_end = current_step + steps_this_round
+
+            # Skip segments already fully completed before a preemption.
+            if segment_end <= resume_pretrain_steps:
+                print(f"Skipping completed segment: {current_step} -> {segment_end}")
+                current_step = segment_end
+                continue
+
+            # Partial resume within this segment.
+            steps_already_done = max(0, resume_pretrain_steps - current_step)
+
             print(f"\nCycle {cycle + 1}, Scale: {scale_env_name}")
-            print(f"Training for {steps_this_round} steps (total: {current_step} -> {current_step + steps_this_round})")
+            print(f"Training steps {steps_already_done + 1} -> {steps_this_round} (global: {current_step + steps_already_done} -> {segment_end})")
 
             env = get_env(scale_env_name, args, args.seed + scale_idx)
             eval_env = get_env(
                 scale_env_name,
                 args,
                 args.seed + scale_idx + 1000,
-                record_dir=experiment_dir / "pretrain_eval"
+                record_dir=experiment_dir / "pretrain_eval",
             )
 
-            warmstart = args.warmstart_steps if current_step == 0 else 0
+            warmstart = args.warmstart_steps if (current_step == 0 and steps_already_done == 0) else 0
+
+            seg_start = current_step  # capture loop var for closure
+
+            def make_save_fn(captured_seg_start):
+                def save_fn(a, steps_in_seg):
+                    save_checkpoint(
+                        a, checkpoint_path,
+                        phase="pretrain",
+                        pretrain_steps_done=captured_seg_start + steps_in_seg,
+                        finetune_steps_done=0,
+                    )
+                return save_fn
 
             agent = train_phase(
                 agent=agent,
@@ -335,12 +376,11 @@ def pretrain_on_scales(
                 warmstart_steps=warmstart,
                 phase_name=f"pretrain/{scale_env_name.split('-')[-2]}",
                 experiment_dir=experiment_dir,
+                resume_from=steps_already_done,
+                save_fn=make_save_fn(seg_start),
             )
 
-            current_step += steps_this_round
-
-    checkpoint_path = experiment_dir / "pretrain_checkpoint.pkl"
-    save_checkpoint(agent, checkpoint_path)
+            current_step = segment_end
 
     return agent
 
@@ -351,13 +391,18 @@ def finetune_on_target(
     spec: specs.EnvironmentSpec,
     replay_buffer: replay.Buffer,
     experiment_dir: Path,
+    checkpoint_path: Path,
+    resume_finetune_steps: int = 0,
 ) -> sac.SAC:
-    """Fine-tune the pretrained agent on the target environment."""
+    """Fine-tune on NocturneRousseau. Supports mid-run resume."""
     print("\n" + "=" * 60)
     print("PHASE 2: FINE-TUNING ON TARGET (NocturneRousseau)")
+    if resume_finetune_steps > 0:
+        print(f"Resuming from step {resume_finetune_steps}")
     print("=" * 60)
 
-    if args.clear_replay_on_finetune:
+    # Only clear replay buffer when starting the finetune phase fresh.
+    if resume_finetune_steps == 0 and args.clear_replay_on_finetune:
         print("Clearing replay buffer for fine-tuning phase...")
         replay_buffer = replay.Buffer(
             state_dim=spec.observation_dim,
@@ -371,8 +416,18 @@ def finetune_on_target(
         args.target_environment,
         args,
         args.seed + 501,
-        record_dir=experiment_dir / "finetune_eval"
+        record_dir=experiment_dir / "finetune_eval",
     )
+
+    def save_fn(a, steps_done):
+        save_checkpoint(
+            a, checkpoint_path,
+            phase="finetune",
+            pretrain_steps_done=args.pretrain_steps,
+            finetune_steps_done=steps_done,
+        )
+
+    warmstart = args.finetune_warmstart_steps if resume_finetune_steps == 0 else 0
 
     agent = train_phase(
         agent=agent,
@@ -383,13 +438,12 @@ def finetune_on_target(
         args=args,
         num_steps=args.finetune_steps,
         start_step=args.pretrain_steps,
-        warmstart_steps=args.finetune_warmstart_steps,
+        warmstart_steps=warmstart,
         phase_name="finetune",
         experiment_dir=experiment_dir,
+        resume_from=resume_finetune_steps,
+        save_fn=save_fn,
     )
-
-    checkpoint_path = experiment_dir / "finetune_checkpoint.pkl"
-    save_checkpoint(agent, checkpoint_path)
 
     return agent
 
@@ -419,6 +473,7 @@ def main(args: Args) -> None:
         config=config,
         mode=args.mode,
         name=run_name,
+        resume="allow",
     )
 
     print("Initializing agent with target environment spec...")
@@ -439,13 +494,26 @@ def main(args: Args) -> None:
         batch_size=args.batch_size,
     )
 
-    agent = pretrain_on_scales(
-        agent=agent,
-        args=args,
-        spec=spec,
-        replay_buffer=replay_buffer,
-        experiment_dir=experiment_dir,
-    )
+    # Resume from checkpoint if one exists.
+    checkpoint_path = experiment_dir / "checkpoint.pkl"
+    phase = "pretrain"
+    pretrain_done = 0
+    finetune_done = 0
+
+    if checkpoint_path.exists():
+        agent, phase, pretrain_done, finetune_done = load_checkpoint(agent, checkpoint_path)
+
+    # Route to the correct phase.
+    if phase == "pretrain":
+        agent = pretrain_on_scales(
+            agent=agent,
+            args=args,
+            spec=spec,
+            replay_buffer=replay_buffer,
+            experiment_dir=experiment_dir,
+            checkpoint_path=checkpoint_path,
+            resume_pretrain_steps=pretrain_done,
+        )
 
     agent = finetune_on_target(
         agent=agent,
@@ -453,6 +521,8 @@ def main(args: Args) -> None:
         spec=spec,
         replay_buffer=replay_buffer,
         experiment_dir=experiment_dir,
+        checkpoint_path=checkpoint_path,
+        resume_finetune_steps=finetune_done,
     )
 
     print("\n" + "=" * 60)

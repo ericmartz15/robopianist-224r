@@ -1,18 +1,16 @@
 """
-Same as modal_curriculum_onset.py but with pretrain_steps reduced to 100_000
-(instead of 500_000).
-
-This is a fully self-contained Modal app: the image/volume/secret are defined
-inline (not imported from modal_curriculum_onset.py), so the remote container
-does not need any other local module to be present.
+Curriculum + onset-alignment, short pretraining (100k pretrain + 400k finetune = 500k total).
+Matches total compute of the 500k baseline for a fair comparison.
 
 Usage:
-    modal run --detach modal_curriculum_onset_short.py
+    modal run modal_curriculum_onset_short.py
+    modal run modal_curriculum_onset_short.py --seed 1 --onset-alpha 0.2
 """
 
-import subprocess
-
 import modal
+import subprocess
+import threading
+import time
 
 app = modal.App("robopianist-curriculum-onset-short")
 
@@ -58,13 +56,14 @@ wandb_secret = modal.Secret.from_name("wandb")
 @app.function(
     image=image,
     volumes={"/output": volume},
-    gpu="T4",
+    gpu="A10G",
     timeout=86400,
     secrets=[wandb_secret],
+    retries=modal.Retries(max_retries=10, initial_delay=30.0, backoff_coefficient=1.0),
 )
 def train_curriculum_onset_short(
     pretrain_steps: int = 100_000,
-    finetune_steps: int = 500_000,
+    finetune_steps: int = 400_000,
     scale_switch_interval: int = 50_000,
     seed: int = 42,
     name: str = "curriculum-onset-short",
@@ -74,7 +73,7 @@ def train_curriculum_onset_short(
     import os
     os.chdir("/root/robopianist-rl")
 
-    subprocess.run([
+    proc = subprocess.Popen([
         "python", "train_curriculum_onset.py",
         "--mode", "online",
         "--project", "robopianist-224r",
@@ -97,7 +96,19 @@ def train_curriculum_onset_short(
         "--primitive-fingertip-collisions",
         "--onset_alpha", str(onset_alpha),
         "--onset_sigma", str(onset_sigma),
-    ], check=True)
+    ])
+
+    # Commit volume every 5 minutes so checkpoints survive worker preemption.
+    def periodic_commit():
+        while proc.poll() is None:
+            time.sleep(300)
+            volume.commit()
+
+    commit_thread = threading.Thread(target=periodic_commit, daemon=True)
+    commit_thread.start()
+    proc.wait()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, "train_curriculum_onset.py")
 
     volume.commit()
 
@@ -105,11 +116,16 @@ def train_curriculum_onset_short(
 @app.local_entrypoint()
 def main(
     pretrain_steps: int = 100_000,
-    finetune_steps: int = 500_000,
+    finetune_steps: int = 400_000,
     seed: int = 42,
     onset_alpha: float = 0.1,
     onset_sigma: float = 2.0,
 ):
+    """
+    Run curriculum + onset-alignment training (100k pretrain + 400k finetune = 500k total).
+    Spawns immediately and returns — safe to close the terminal.
+    Auto-retries on GPU preemption, resuming from the last checkpoint each time.
+    """
     call = train_curriculum_onset_short.spawn(
         pretrain_steps=pretrain_steps,
         finetune_steps=finetune_steps,
@@ -118,5 +134,5 @@ def main(
         onset_alpha=onset_alpha,
         onset_sigma=onset_sigma,
     )
-    print(f"Job submitted. Function call ID: {call.object_id}")
-    print("Monitor at https://modal.com/apps/afishpez/main/")
+    print(f"Job submitted. Will auto-retry on preemption.")
+    print(f"Function call ID: {call.object_id}")
