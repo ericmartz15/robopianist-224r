@@ -1,27 +1,90 @@
 """
-Curriculum experiment with Eb major scale pretraining (shift=3 semitones).
+Curriculum experiments with Eb major scale pretraining (shift=3 semitones).
 
 The Nocturne is in Eb major, so this tests whether key-matched pretraining
-helps more than the mismatched C/D major scales used in modal_experiments.py.
+helps more than the mismatched C/D major scales in modal_experiments.py.
 Runs both curriculum conditions (with and without onset reward) in parallel.
 
 Usage:
-    modal run --detach modal_eb_curriculum.py
+    modal run modal_eb_curriculum.py
 """
 
 import modal
-from modal_experiments import image as _base_image, volume, wandb_secret, _fn_kwargs, _run
+import subprocess
+import threading
+import time
 
 app = modal.App("robopianist-eb-curriculum")
 
-# Extend the existing image with the Eb-aware training script.
-image = _base_image.add_local_file(
-    "train_curriculum_eb.py", "/root/robopianist-rl/train_curriculum_eb.py"
+image = (
+    modal.Image.debian_slim(python_version="3.10")
+    .apt_install(
+        "libgl1-mesa-glx",
+        "libosmesa6-dev",
+        "patchelf",
+        "libglfw3",
+        "libglew-dev",
+        "ffmpeg",
+        "fluidsynth",
+        "git",
+        "portaudio19-dev",
+    )
+    .env({
+        "MUJOCO_GL": "egl",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    })
+    .run_commands(
+        "git clone https://github.com/kevinzakka/robopianist-rl /root/robopianist-rl",
+    )
+    .pip_install(
+        "numpy>=1.22,<2.0",
+        "scipy>=1.9,<1.12",
+        "jax==0.4.20",
+        "jaxlib==0.4.20",
+        "flax==0.7.5",
+        "optax==0.1.7",
+        "distrax==0.1.5",
+        "mujoco==3.7.0",
+        "dm-control==1.0.39",
+        "robopianist>=1.0.6",
+        "wandb",
+        "tyro",
+        "tqdm",
+        "dm_env_wrappers",
+    )
+    .add_local_file("train_curriculum_eb.py", "/root/robopianist-rl/train_curriculum_eb.py")
+    .add_local_file("onset_alignment.py", "/root/robopianist-rl/onset_alignment.py")
 )
-_eb_fn_kwargs = {**_fn_kwargs, "image": image}
+
+volume = modal.Volume.from_name("robopianist-results", create_if_missing=True)
+wandb_secret = modal.Secret.from_name("wandb")
+
+_fn_kwargs = dict(
+    image=image,
+    volumes={"/output": volume},
+    gpu="A10G",
+    timeout=86400,
+    secrets=[wandb_secret],
+    retries=modal.Retries(max_retries=10, initial_delay=30.0, backoff_coefficient=1.0),
+)
 
 
-@app.function(**_eb_fn_kwargs)
+def _run(cmd: list, vol: modal.Volume) -> None:
+    proc = subprocess.Popen(cmd)
+
+    def _commit_loop():
+        while proc.poll() is None:
+            time.sleep(300)
+            vol.commit()
+
+    threading.Thread(target=_commit_loop, daemon=True).start()
+    proc.wait()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd[1])
+    vol.commit()
+
+
+@app.function(**_fn_kwargs)
 def run_eb_curriculum(
     pretrain_steps: int = 100_000,
     finetune_steps: int = 400_000,
@@ -57,7 +120,7 @@ def run_eb_curriculum(
     ], volume)
 
 
-@app.function(**_eb_fn_kwargs)
+@app.function(**_fn_kwargs)
 def run_eb_curriculum_onset(
     pretrain_steps: int = 100_000,
     finetune_steps: int = 400_000,
@@ -97,27 +160,27 @@ def run_eb_curriculum_onset(
 
 
 @app.local_entrypoint()
-def main(
+async def main(
     pretrain_steps: int = 100_000,
     finetune_steps: int = 400_000,
     seed: int = 42,
     onset_alpha: float = 0.1,
     onset_sigma: float = 2.0,
 ):
-    fc1 = run_eb_curriculum.spawn(
-        pretrain_steps=pretrain_steps,
-        finetune_steps=finetune_steps,
-        seed=seed,
-        name=f"eb-curriculum-no-onset-seed{seed}",
+    import asyncio
+    await asyncio.gather(
+        run_eb_curriculum.remote.aio(
+            pretrain_steps=pretrain_steps,
+            finetune_steps=finetune_steps,
+            seed=seed,
+            name=f"eb-curriculum-no-onset-seed{seed}",
+        ),
+        run_eb_curriculum_onset.remote.aio(
+            pretrain_steps=pretrain_steps,
+            finetune_steps=finetune_steps,
+            seed=seed,
+            onset_alpha=onset_alpha,
+            onset_sigma=onset_sigma,
+            name=f"eb-curriculum-onset-a{onset_alpha}-seed{seed}",
+        ),
     )
-    fc2 = run_eb_curriculum_onset.spawn(
-        pretrain_steps=pretrain_steps,
-        finetune_steps=finetune_steps,
-        seed=seed,
-        onset_alpha=onset_alpha,
-        onset_sigma=onset_sigma,
-        name=f"eb-curriculum-onset-a{onset_alpha}-seed{seed}",
-    )
-    print(f"Spawned 2 Eb-major curriculum experiments (seed={seed}).")
-    print(f"  curriculum (no onset): {fc1.object_id}")
-    print(f"  curriculum + onset:    {fc2.object_id}")
