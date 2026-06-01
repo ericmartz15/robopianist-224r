@@ -160,27 +160,33 @@ def run_eb_curriculum_onset(
 
 
 @app.local_entrypoint()
-async def main(
+def main(
     pretrain_steps: int = 100_000,
     finetune_steps: int = 400_000,
     seed: int = 42,
     onset_alpha: float = 0.1,
     onset_sigma: float = 2.0,
 ):
-    import asyncio
-    await asyncio.gather(
-        run_eb_curriculum.remote.aio(
-            pretrain_steps=pretrain_steps,
-            finetune_steps=finetune_steps,
-            seed=seed,
-            name=f"eb-curriculum-no-onset-seed{seed}",
-        ),
-        run_eb_curriculum_onset.remote.aio(
-            pretrain_steps=pretrain_steps,
-            finetune_steps=finetune_steps,
-            seed=seed,
-            onset_alpha=onset_alpha,
-            onset_sigma=onset_sigma,
-            name=f"eb-curriculum-onset-a{onset_alpha}-seed{seed}",
-        ),
+    """
+    Spawn both Eb-curriculum experiments in parallel and exit immediately.
+    Use `modal run --detach modal_eb_curriculum.py`.
+
+    Each run auto-retries on GPU preemption and resumes from checkpoints.
+    """
+    fc1 = run_eb_curriculum.spawn(
+        pretrain_steps=pretrain_steps,
+        finetune_steps=finetune_steps,
+        seed=seed,
+        name=f"eb-curriculum-no-onset-seed{seed}",
     )
+    fc2 = run_eb_curriculum_onset.spawn(
+        pretrain_steps=pretrain_steps,
+        finetune_steps=finetune_steps,
+        seed=seed,
+        onset_alpha=onset_alpha,
+        onset_sigma=onset_sigma,
+        name=f"eb-curriculum-onset-a{onset_alpha}-seed{seed}",
+    )
+    print(f"Spawned 2 Eb-curriculum experiments in parallel (seed={seed}).")
+    print(f"  eb-curriculum (no onset): {fc1.object_id}")
+    print(f"  eb-curriculum + onset:    {fc2.object_id}")

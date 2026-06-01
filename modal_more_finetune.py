@@ -153,21 +153,27 @@ def run_curriculum_onset(
 
 
 @app.local_entrypoint()
-async def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
-    import asyncio
-    await asyncio.gather(
-        run_curriculum.remote.aio(
-            pretrain_steps=100_000,
-            finetune_steps=500_000,
-            seed=seed,
-            name=f"curriculum-no-onset-600k-seed{seed}",
-        ),
-        run_curriculum_onset.remote.aio(
-            pretrain_steps=100_000,
-            finetune_steps=500_000,
-            seed=seed,
-            onset_alpha=onset_alpha,
-            onset_sigma=onset_sigma,
-            name=f"curriculum-onset-600k-a{onset_alpha}-seed{seed}",
-        ),
+def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
+    """
+    Spawn both 600k curriculum experiments in parallel and exit immediately.
+    Use `modal run --detach modal_more_finetune.py`.
+
+    Each run auto-retries on GPU preemption and resumes from checkpoints.
+    """
+    fc1 = run_curriculum.spawn(
+        pretrain_steps=100_000,
+        finetune_steps=500_000,
+        seed=seed,
+        name=f"curriculum-no-onset-600k-seed{seed}",
     )
+    fc2 = run_curriculum_onset.spawn(
+        pretrain_steps=100_000,
+        finetune_steps=500_000,
+        seed=seed,
+        onset_alpha=onset_alpha,
+        onset_sigma=onset_sigma,
+        name=f"curriculum-onset-600k-a{onset_alpha}-seed{seed}",
+    )
+    print(f"Spawned 2 600k-curriculum experiments in parallel (seed={seed}).")
+    print(f"  curriculum 600k (no onset): {fc1.object_id}")
+    print(f"  curriculum 600k + onset:    {fc2.object_id}")
