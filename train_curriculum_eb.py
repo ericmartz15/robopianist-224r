@@ -252,7 +252,7 @@ def train_phase(
         if timestep.last():
             stats = env.get_statistics()
             if onset_wrapper is not None and episode_steps > 0:
-                total_return = stats.get("episode_return", 0.0)
+                total_return = stats.get("return", 0.0)  # EpisodeStatisticsWrapper key is "return"
                 onset_contribution = args.onset_alpha * episode_onset_bonus
                 stats["onset_bonus_per_step"] = episode_onset_bonus / episode_steps
                 stats["base_f1_return"] = total_return - onset_contribution
