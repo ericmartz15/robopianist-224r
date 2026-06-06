@@ -29,6 +29,7 @@ import dm_env_wrappers as wrappers
 import robopianist.wrappers as robopianist_wrappers
 
 from onset_alignment import OnsetAlignmentWrapper
+from arpeggio_midi import ARPEGGIO_GENERATORS, make_arpeggio_midi_path
 
 
 SCALE_ENVIRONMENTS = [
@@ -85,6 +86,7 @@ class Args:
     action_reward_observation: bool = False
     agent_config: sac.SACConfig = field(default_factory=sac.SACConfig)
     scale_switch_interval: int = 50_000
+    pretrain_shift: int = 0        # semitone shift applied during pretraining (0=C/D, 3=Eb/F)
     clear_replay_on_finetune: bool = True
     finetune_warmstart_steps: int = 1_000
     checkpoint_interval: int = 10_000
@@ -112,27 +114,53 @@ def get_env(
     args: Args,
     seed: int,
     record_dir: Optional[Path] = None,
+    shift: Optional[int] = None,  # overrides args.shift_factor when provided
 ):
-    env = suite.load(
-        environment_name=environment_name,
-        seed=seed,
-        stretch=args.stretch_factor,
-        shift=args.shift_factor,
-        task_kwargs=dict(
-            n_steps_lookahead=args.n_steps_lookahead,
-            trim_silence=args.trim_silence,
-            gravity_compensation=args.gravity_compensation,
-            reduced_action_space=args.reduced_action_space,
-            control_timestep=args.control_timestep,
-            wrong_press_termination=args.wrong_press_termination,
-            disable_fingering_reward=args.disable_fingering_reward,
-            disable_forearm_reward=args.disable_forearm_reward,
-            disable_colorization=args.disable_colorization,
-            disable_hand_collisions=args.disable_hand_collisions,
-            primitive_fingertip_collisions=args.primitive_fingertip_collisions,
-            change_color_on_activation=True,
-        ),
+    effective_shift = shift if shift is not None else args.shift_factor
+
+    task_kwargs = dict(
+        n_steps_lookahead=args.n_steps_lookahead,
+        trim_silence=args.trim_silence,
+        gravity_compensation=args.gravity_compensation,
+        reduced_action_space=args.reduced_action_space,
+        control_timestep=args.control_timestep,
+        wrong_press_termination=args.wrong_press_termination,
+        disable_fingering_reward=args.disable_fingering_reward,
+        disable_forearm_reward=args.disable_forearm_reward,
+        disable_colorization=args.disable_colorization,
+        disable_hand_collisions=args.disable_hand_collisions,
+        primitive_fingertip_collisions=args.primitive_fingertip_collisions,
+        change_color_on_activation=True,
     )
+
+    # Arpeggio environments are not in the suite registry — generate and save
+    # to a temp MIDI file, then load via suite.load(midi_file=path).
+    arpeggio_path = None
+    if environment_name in ARPEGGIO_GENERATORS:
+        arpeggio_path = make_arpeggio_midi_path(environment_name)
+
+    try:
+        if arpeggio_path is not None:
+            env = suite.load(
+                environment_name="RoboPianist-debug-NocturneRousseau-v0",  # unused when midi_file provided
+                midi_file=arpeggio_path,
+                seed=seed,
+                stretch=args.stretch_factor,
+                shift=effective_shift,
+                task_kwargs=task_kwargs,
+            )
+        else:
+            env = suite.load(
+                environment_name=environment_name,
+                seed=seed,
+                stretch=args.stretch_factor,
+                shift=effective_shift,
+                task_kwargs=task_kwargs,
+            )
+    finally:
+        if arpeggio_path is not None:
+            arpeggio_path.unlink(missing_ok=True)
+
     # Temporal onset-alignment bonus. Must wrap the raw environment before any
     # other wrappers so we can still access env.task.piano.activation.
     env = OnsetAlignmentWrapper(
@@ -342,12 +370,14 @@ def pretrain_on_scales(
             print(f"\nCycle {cycle + 1}, Scale: {scale_env_name}")
             print(f"Training steps {steps_already_done + 1} -> {steps_this_round} (global: {current_step + steps_already_done} -> {segment_end})")
 
-            env = get_env(scale_env_name, args, args.seed + scale_idx)
+            env = get_env(scale_env_name, args, args.seed + scale_idx,
+                          shift=args.pretrain_shift)
             eval_env = get_env(
                 scale_env_name,
                 args,
                 args.seed + scale_idx + 1000,
                 record_dir=experiment_dir / "pretrain_eval",
+                shift=args.pretrain_shift,
             )
 
             warmstart = args.warmstart_steps if (current_step == 0 and steps_already_done == 0) else 0
