@@ -51,6 +51,7 @@ image = (
     )
     .add_local_file("train_curriculum_onset.py", "/root/robopianist-rl/train_curriculum_onset.py")
     .add_local_file("onset_alignment.py", "/root/robopianist-rl/onset_alignment.py")
+    .add_local_file("arpeggio_midi.py", "/root/robopianist-rl/arpeggio_midi.py")
 )
 
 volume = modal.Volume.from_name("robopianist-results", create_if_missing=True)
