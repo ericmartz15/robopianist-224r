@@ -95,11 +95,24 @@ def _run(cmd: list, vol: modal.Volume) -> None:
 
 # ── Experiment 1: Baseline ────────────────────────────────────────────────────
 
+_DEFAULT_TARGET = "RoboPianist-debug-NocturneRousseau-v0"
+
+
+def _piece_label(target: str) -> str:
+    """Extract a short label from an environment name for use in run names.
+    e.g. 'RoboPianist-etude-12-PianoSonataK279InCMajor1stMov1-v0' -> 'PianoSonataK279InCMajor1stMov1'
+    """
+    return target.removesuffix("-v0").split("-")[-1]
+
+
 @app.function(**_fn_kwargs)
-def run_baseline(max_steps: int = 500_000, seed: int = 42, name: str = ""):
-    """No curriculum, no onset reward. Uses train_curriculum_onset.py with
-    pretrain_steps=0 and onset_alpha=0 so all four conditions log identical
-    metrics (onset_bonus_per_step is computed but not added to reward)."""
+def run_baseline(
+    max_steps: int = 500_000,
+    seed: int = 42,
+    name: str = "",
+    target: str = _DEFAULT_TARGET,
+):
+    """No curriculum, no onset reward."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -124,7 +137,8 @@ def run_baseline(max_steps: int = 500_000, seed: int = 42, name: str = ""):
         "--action-reward-observation",
         "--primitive-fingertip-collisions",
         "--root_dir", "/output",
-        "--onset_alpha", "0.0",   # wrapper runs but adds 0 reward; bonus still logged
+        "--target_environment", target,
+        "--onset_alpha", "0.0",
     ], volume)
 
 
@@ -136,6 +150,7 @@ def run_curriculum(
     finetune_steps: int = 400_000,
     seed: int = 42,
     name: str = "",
+    target: str = _DEFAULT_TARGET,
 ):
     import os
     os.chdir("/root/robopianist-rl")
@@ -160,7 +175,8 @@ def run_curriculum(
         "--action-reward-observation",
         "--primitive-fingertip-collisions",
         "--control_timestep", "0.05",
-        "--onset_alpha", "0.0",   # onset_alpha=0 → no onset bonus, pure curriculum
+        "--target_environment", target,
+        "--onset_alpha", "0.0",
     ], volume)
 
 
@@ -173,8 +189,9 @@ def run_onset_only(
     onset_alpha: float = 0.1,
     onset_sigma: float = 2.0,
     name: str = "",
+    target: str = _DEFAULT_TARGET,
 ):
-    """500k steps on NocturneRousseau with onset reward, no scale pretraining."""
+    """500k steps with onset reward, no scale pretraining."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -182,9 +199,9 @@ def run_onset_only(
         "--mode", "online",
         "--project", "robopianist-224r",
         "--name", name,
-        "--pretrain_steps", "0",        # skip pretrain phase entirely
+        "--pretrain_steps", "0",
         "--finetune_steps", str(finetune_steps),
-        "--finetune_warmstart_steps", "5000",  # match baseline warmstart
+        "--finetune_warmstart_steps", "5000",
         "--seed", str(seed),
         "--gravity_compensation",
         "--n_steps_lookahead", "10",
@@ -199,6 +216,7 @@ def run_onset_only(
         "--action-reward-observation",
         "--primitive-fingertip-collisions",
         "--control_timestep", "0.05",
+        "--target_environment", target,
         "--onset_alpha", str(onset_alpha),
         "--onset_sigma", str(onset_sigma),
     ], volume)
@@ -214,6 +232,7 @@ def run_curriculum_onset(
     onset_alpha: float = 0.1,
     onset_sigma: float = 2.0,
     name: str = "",
+    target: str = _DEFAULT_TARGET,
 ):
     import os
     os.chdir("/root/robopianist-rl")
@@ -238,6 +257,7 @@ def run_curriculum_onset(
         "--action-reward-observation",
         "--primitive-fingertip-collisions",
         "--control_timestep", "0.05",
+        "--target_environment", target,
         "--onset_alpha", str(onset_alpha),
         "--onset_sigma", str(onset_sigma),
     ], volume)
@@ -246,7 +266,12 @@ def run_curriculum_onset(
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 
 @app.local_entrypoint()
-def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
+def main(
+    seed: int = 42,
+    onset_alpha: float = 0.1,
+    onset_sigma: float = 2.0,
+    target: str = _DEFAULT_TARGET,
+):
     """
     Spawn all four 500k-compute experiments in parallel. Returns immediately.
     Each run auto-retries on GPU preemption, resuming from its last checkpoint.
@@ -256,25 +281,32 @@ def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
       no curriculum    baseline           onset-only
       curriculum       curriculum         curriculum+onset
 
+    Use --target to run on a different piece, e.g.:
+        modal run --detach modal_experiments.py --target RoboPianist-etude-12-PianoSonataK279InCMajor1stMov1-v0
+
     Monitor progress at https://wandb.ai/
     """
+    piece = _piece_label(target)
     fc1 = run_baseline.spawn(
         max_steps=500_000,
         seed=seed,
-        name=f"baseline-500k-seed{seed}",
+        target=target,
+        name=f"baseline-{piece}-500k-seed{seed}",
     )
     fc2 = run_onset_only.spawn(
         finetune_steps=500_000,
         seed=seed,
         onset_alpha=onset_alpha,
         onset_sigma=onset_sigma,
-        name=f"onset-only-a{onset_alpha}-seed{seed}",
+        target=target,
+        name=f"onset-only-{piece}-a{onset_alpha}-seed{seed}",
     )
     fc3 = run_curriculum.spawn(
         pretrain_steps=100_000,
         finetune_steps=400_000,
         seed=seed,
-        name=f"curriculum-no-onset-seed{seed}",
+        target=target,
+        name=f"curriculum-no-onset-{piece}-seed{seed}",
     )
     fc4 = run_curriculum_onset.spawn(
         pretrain_steps=100_000,
@@ -282,9 +314,10 @@ def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
         seed=seed,
         onset_alpha=onset_alpha,
         onset_sigma=onset_sigma,
-        name=f"curriculum-onset-a{onset_alpha}-seed{seed}",
+        target=target,
+        name=f"curriculum-onset-{piece}-a{onset_alpha}-seed{seed}",
     )
-    print(f"Spawned 4 experiments in parallel (seed={seed}, onset_alpha={onset_alpha}).")
+    print(f"Spawned 4 experiments (piece={piece}, seed={seed}, onset_alpha={onset_alpha}).")
     print(f"  baseline:              {fc1.object_id}")
     print(f"  onset only:            {fc2.object_id}")
     print(f"  curriculum (no onset): {fc3.object_id}")
