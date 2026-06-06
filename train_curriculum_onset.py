@@ -404,7 +404,7 @@ def pretrain_on_scales(
                 num_steps=steps_this_round,
                 start_step=current_step,
                 warmstart_steps=warmstart,
-                phase_name=f"pretrain/{scale_env_name.split('-')[-2]}",
+                phase_name=f"pretrain/{scale_env_name.split('-')[-2] if '-' in scale_env_name else scale_env_name}",
                 experiment_dir=experiment_dir,
                 resume_from=steps_already_done,
                 save_fn=make_save_fn(seg_start),
