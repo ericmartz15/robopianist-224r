@@ -1,5 +1,15 @@
 """
-Arpeggio MIDI generators for RoboPianist curriculum pretraining.
+Arpeggio MIDI generators and direct environment loader for RoboPianist.
+
+IMPORTANT: arpeggio environments must NOT be loaded via suite.load(midi_file=path)
+because saving a NoteSequence to .mid and reloading loses the `part` (fingering)
+field — MIDI channels don't map back to robopianist part numbers. This causes
+has_fingering() to return False, disabling the 10-dim fingering observable and
+producing a 1154-dim observation instead of the expected 1164-dim one.
+
+Instead, use make_arpeggio_env() which instantiates PianoWithShadowHands directly
+from the in-memory MidiFile, preserving part values and matching the target
+environment's observation space exactly.
 
 Broken-chord (arpeggio) patterns in C and D major. These are structurally
 closer to the Nocturne's left-hand accompaniment (waltz-bass arpeggios) than
@@ -15,12 +25,14 @@ Environments:
     DMajorArpeggioTwoHands   - waltz-bass in D major
 """
 
-import tempfile
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
+import dm_env
 from note_seq import music_pb2
 from robopianist.music import midi_file
+from robopianist.suite.tasks import piano_with_shadow_hands
+from mujoco_utils import composer_utils
 
 
 # ---------------------------------------------------------------------------
@@ -192,15 +204,32 @@ ARPEGGIO_GENERATORS: Dict[str, Callable[[], midi_file.MidiFile]] = {
 ARPEGGIO_ENVIRONMENT_NAMES = list(ARPEGGIO_GENERATORS.keys())
 
 
-def make_arpeggio_midi_path(name: str) -> Path:
-    """Generate an arpeggio MIDI and save to a temp .mid file. Caller must delete."""
+def make_arpeggio_env(
+    name: str,
+    seed: Optional[int],
+    task_kwargs: dict,
+    shift: int = 0,
+) -> dm_env.Environment:
+    """
+    Instantiate a RoboPianist environment directly from an in-memory arpeggio
+    MidiFile, bypassing save/load. This preserves the `part` (fingering) field
+    so has_fingering() returns True and the observation space matches the target
+    environment (1164 dims, fingering observable enabled).
+
+    Equivalent to suite.load() but without the file roundtrip.
+    """
     if name not in ARPEGGIO_GENERATORS:
         raise ValueError(
             f"Unknown arpeggio environment '{name}'. "
             f"Available: {list(ARPEGGIO_GENERATORS)}"
         )
     midi_obj = ARPEGGIO_GENERATORS[name]()
-    tmp = tempfile.NamedTemporaryFile(suffix=".mid", delete=False)
-    tmp.close()
-    midi_obj.save(tmp.name)
-    return Path(tmp.name)
+    if shift != 0:
+        midi_obj = midi_obj.transpose(shift)
+    return composer_utils.Environment(
+        task=piano_with_shadow_hands.PianoWithShadowHands(midi=midi_obj, **task_kwargs),
+        random_state=seed,
+        strip_singleton_obs_buffer_dim=True,
+        recompile_physics=False,
+        legacy_step=True,
+    )

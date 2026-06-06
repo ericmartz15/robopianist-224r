@@ -29,7 +29,7 @@ import dm_env_wrappers as wrappers
 import robopianist.wrappers as robopianist_wrappers
 
 from onset_alignment import OnsetAlignmentWrapper
-from arpeggio_midi import ARPEGGIO_GENERATORS, make_arpeggio_midi_path
+from arpeggio_midi import ARPEGGIO_GENERATORS, make_arpeggio_env
 
 
 SCALE_ENVIRONMENTS = [
@@ -133,33 +133,24 @@ def get_env(
         change_color_on_activation=True,
     )
 
-    # Arpeggio environments are not in the suite registry — generate and save
-    # to a temp MIDI file, then load via suite.load(midi_file=path).
-    arpeggio_path = None
+    # Arpeggio environments are not in the suite registry. Instantiate directly
+    # from the in-memory MidiFile to preserve fingering `part` values — saving
+    # to .mid and reloading loses them, causing a 10-dim observation mismatch.
     if environment_name in ARPEGGIO_GENERATORS:
-        arpeggio_path = make_arpeggio_midi_path(environment_name)
-
-    try:
-        if arpeggio_path is not None:
-            env = suite.load(
-                environment_name="RoboPianist-debug-NocturneRousseau-v0",  # unused when midi_file provided
-                midi_file=arpeggio_path,
-                seed=seed,
-                stretch=args.stretch_factor,
-                shift=effective_shift,
-                task_kwargs=task_kwargs,
-            )
-        else:
-            env = suite.load(
-                environment_name=environment_name,
-                seed=seed,
-                stretch=args.stretch_factor,
-                shift=effective_shift,
-                task_kwargs=task_kwargs,
-            )
-    finally:
-        if arpeggio_path is not None:
-            arpeggio_path.unlink(missing_ok=True)
+        env = make_arpeggio_env(
+            name=environment_name,
+            seed=seed,
+            task_kwargs=task_kwargs,
+            shift=effective_shift,
+        )
+    else:
+        env = suite.load(
+            environment_name=environment_name,
+            seed=seed,
+            stretch=args.stretch_factor,
+            shift=effective_shift,
+            task_kwargs=task_kwargs,
+        )
 
     # Temporal onset-alignment bonus. Must wrap the raw environment before any
     # other wrappers so we can still access env.task.piano.activation.
