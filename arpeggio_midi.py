@@ -1,30 +1,3 @@
-"""
-Arpeggio MIDI generators and direct environment loader for RoboPianist.
-
-IMPORTANT: arpeggio environments must NOT be loaded via suite.load(midi_file=path)
-because saving a NoteSequence to .mid and reloading loses the `part` (fingering)
-field — MIDI channels don't map back to robopianist part numbers. This causes
-has_fingering() to return False, disabling the 10-dim fingering observable and
-producing a 1154-dim observation instead of the expected 1164-dim one.
-
-Instead, use make_arpeggio_env() which instantiates PianoWithShadowHands directly
-from the in-memory MidiFile, preserving part values and matching the target
-environment's observation space exactly.
-
-Broken-chord (arpeggio) patterns in C and D major. These are structurally
-closer to the Nocturne's left-hand accompaniment (waltz-bass arpeggios) than
-scale exercises, while still being simpler than the target piece.
-
-Use shift=3 via suite.load to get Eb/F major versions (key-matched to
-NocturneRousseau).
-
-Environments:
-    CMajorArpeggioOneHand    - RH broken chord, C-E-G-C up/down
-    CMajorArpeggioTwoHands   - waltz-bass: LH root, RH chord tones
-    DMajorArpeggioOneHand    - RH broken chord, D-F#-A-D up/down
-    DMajorArpeggioTwoHands   - waltz-bass in D major
-"""
-
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -35,10 +8,6 @@ from robopianist.suite.tasks import piano_with_shadow_hands
 from mujoco_utils import composer_utils
 
 
-# ---------------------------------------------------------------------------
-# Generators
-# ---------------------------------------------------------------------------
-
 def _c_major_arpeggio_one_hand(
     right_octave: int = 6,
     note_duration: float = 0.25,
@@ -48,9 +17,8 @@ def _c_major_arpeggio_one_hand(
     seq.sequence_metadata.title = "C major arpeggio (one hand)"
     seq.sequence_metadata.artist = "robopianist"
 
-    root = 12 * right_octave  # C6 = 72
-    # C E G C(up) G E C(down)
-    pattern = [0, 4, 7, 12, 7, 4, 0]
+    root = 12 * right_octave
+    pattern = [0, 4, 7, 12, 7, 4, 0] # C E G C G E C
     fingering = [0, 1, 2, 4, 2, 1, 0]
 
     notes = pattern * 4
@@ -75,20 +43,16 @@ def _c_major_arpeggio_two_hands(
     right_octave: int = 6,
     note_duration: float = 0.25,
 ) -> midi_file.MidiFile:
-    """
-    C major waltz-bass arpeggio (two hands), 6 cycles.
-    LH plays the bass note on beat 1; RH plays E-G-C on beats 2-4.
-    Mimics the Nocturne's left-hand accompaniment pattern.
-    """
+    
     seq = music_pb2.NoteSequence()
     seq.sequence_metadata.title = "C major arpeggio (two hands)"
     seq.sequence_metadata.artist = "robopianist"
 
-    lh_bass = 12 * left_octave        # C4 = 48
-    rh_root = 12 * right_octave       # C6 = 72
-    rh_pattern = [4, 7, 12]           # E G C (above root)
+    lh_bass = 12 * left_octave 
+    rh_root = 12 * right_octave
+    rh_pattern = [4, 7, 12] # E G C 
     rh_fingers = [1, 2, 4]
-    lh_finger = 9                     # LH thumb
+    lh_finger = 9 
 
     for cycle in range(6):
         t = cycle * 4 * note_duration
@@ -120,14 +84,13 @@ def _d_major_arpeggio_one_hand(
     right_octave: int = 6,
     note_duration: float = 0.25,
 ) -> midi_file.MidiFile:
-    """D major broken chord, right hand. D-F#-A-D up and down, 4 repetitions."""
+    
     seq = music_pb2.NoteSequence()
     seq.sequence_metadata.title = "D major arpeggio (one hand)"
     seq.sequence_metadata.artist = "robopianist"
 
-    root = 12 * right_octave + 2  # D6 = 74
-    # D F# A D(up) A F# D(down)
-    pattern = [0, 4, 7, 12, 7, 4, 0]
+    root = 12 * right_octave + 2 
+    pattern = [0, 4, 7, 12, 7, 4, 0] # D F# A D(up) A F# D(down)
     fingering = [0, 1, 2, 4, 2, 1, 0]
 
     notes = pattern * 4
@@ -152,17 +115,14 @@ def _d_major_arpeggio_two_hands(
     right_octave: int = 6,
     note_duration: float = 0.25,
 ) -> midi_file.MidiFile:
-    """
-    D major waltz-bass arpeggio (two hands), 6 cycles.
-    LH plays D bass on beat 1; RH plays F#-A-D on beats 2-4.
-    """
+    
     seq = music_pb2.NoteSequence()
     seq.sequence_metadata.title = "D major arpeggio (two hands)"
     seq.sequence_metadata.artist = "robopianist"
 
-    lh_bass = 12 * left_octave + 2    # D4 = 50
-    rh_root = 12 * right_octave + 2   # D6 = 74
-    rh_pattern = [4, 7, 12]           # F# A D
+    lh_bass = 12 * left_octave + 2  
+    rh_root = 12 * right_octave + 2 
+    rh_pattern = [4, 7, 12]
     rh_fingers = [1, 2, 4]
     lh_finger = 9
 
@@ -190,9 +150,6 @@ def _d_major_arpeggio_two_hands(
     return midi_file.MidiFile(seq=seq)
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 
 ARPEGGIO_GENERATORS: Dict[str, Callable[[], midi_file.MidiFile]] = {
     "CMajorArpeggioOneHand": _c_major_arpeggio_one_hand,
@@ -210,14 +167,7 @@ def make_arpeggio_env(
     task_kwargs: dict,
     shift: int = 0,
 ) -> dm_env.Environment:
-    """
-    Instantiate a RoboPianist environment directly from an in-memory arpeggio
-    MidiFile, bypassing save/load. This preserves the `part` (fingering) field
-    so has_fingering() returns True and the observation space matches the target
-    environment (1164 dims, fingering observable enabled).
-
-    Equivalent to suite.load() but without the file roundtrip.
-    """
+    
     if name not in ARPEGGIO_GENERATORS:
         raise ValueError(
             f"Unknown arpeggio environment '{name}'. "

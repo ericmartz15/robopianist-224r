@@ -1,20 +1,3 @@
-"""
-Arpeggio curriculum experiments — 2x2 design matching modal_experiments.py.
-
-Tests whether broken-chord (arpeggio) pretraining transfers better than
-scale pretraining, since arpeggios are structurally closer to the Nocturne's
-left-hand accompaniment pattern.
-
-2x2 design (C/D arpeggios vs Eb/F arpeggios) x (onset reward vs no onset):
-    arpeggio-cd-no-onset       100k C/D arpeggio pretrain + 400k finetune
-    arpeggio-cd-onset          same + onset reward
-    arpeggio-eb-no-onset       100k Eb/F arpeggio pretrain + 400k finetune
-    arpeggio-eb-onset          same + onset reward
-
-Usage:
-    modal run --detach modal_arpeggio_curriculum.py
-"""
-
 import modal
 import subprocess
 import threading
@@ -50,8 +33,6 @@ image = (
         "flax==0.7.5",
         "optax==0.1.7",
         "distrax==0.1.5",
-        # Pin mujoco + dm-control: dm-control>=1.0.40 references flex_bandwidth
-        # which was removed in mujoco 3.9.0. 1.0.39 is the last safe version.
         "mujoco==3.7.0",
         "dm-control==1.0.39",
         "robopianist>=1.0.6",
@@ -77,7 +58,6 @@ _fn_kwargs = dict(
     retries=modal.Retries(max_retries=10, initial_delay=30.0, backoff_coefficient=1.0),
 )
 
-# Arpeggio environments (defined in arpeggio_midi.py)
 ARPEGGIO_SCALE_ENVS = [
     "CMajorArpeggioOneHand",
     "CMajorArpeggioTwoHands",
@@ -110,7 +90,6 @@ def _curriculum_cmd(
     onset_sigma: float,
     pretrain_shift: int,
 ) -> list:
-    """Build the train_curriculum_onset.py command for an arpeggio curriculum run."""
     return [
         "python", "train_curriculum_onset.py",
         "--mode", "online",
@@ -134,14 +113,12 @@ def _curriculum_cmd(
         "--control_timestep", "0.05",
         "--onset_alpha", str(onset_alpha),
         "--onset_sigma", str(onset_sigma),
-        # Override default scale environments with arpeggio environments
         "--scale_environments", *ARPEGGIO_SCALE_ENVS,
-        # Shift applied during pretrain (0 = C/D, 3 = Eb/F)
         "--pretrain_shift", str(pretrain_shift),
     ]
 
 
-# ── Experiment 1: C/D arpeggio, no onset ─────────────────────────────────────
+# C/D arpeggio but no onset 
 
 @app.function(**_fn_kwargs)
 def run_arpeggio_cd_no_onset(
@@ -163,7 +140,7 @@ def run_arpeggio_cd_no_onset(
     ), volume)
 
 
-# ── Experiment 2: C/D arpeggio + onset ───────────────────────────────────────
+# C/D arpeggio and onset
 
 @app.function(**_fn_kwargs)
 def run_arpeggio_cd_onset(
@@ -187,7 +164,7 @@ def run_arpeggio_cd_onset(
     ), volume)
 
 
-# ── Experiment 3: Eb/F arpeggio, no onset ────────────────────────────────────
+# Eb/F arpeggio but no onset
 
 @app.function(**_fn_kwargs)
 def run_arpeggio_eb_no_onset(
@@ -205,11 +182,11 @@ def run_arpeggio_eb_no_onset(
         seed=seed,
         onset_alpha=0.0,
         onset_sigma=2.0,
-        pretrain_shift=3,  # C/D → Eb/F
+        pretrain_shift=3,  # C/D to Eb/F
     ), volume)
 
 
-# ── Experiment 4: Eb/F arpeggio + onset ──────────────────────────────────────
+# Eb/F arpeggio and onset 
 
 @app.function(**_fn_kwargs)
 def run_arpeggio_eb_onset(
@@ -232,15 +209,9 @@ def run_arpeggio_eb_onset(
         pretrain_shift=3,
     ), volume)
 
-
-# ── Entrypoint ────────────────────────────────────────────────────────────────
-
 @app.local_entrypoint()
 def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
-    """
-    Spawn all 4 arpeggio curriculum experiments in parallel.
-    Use: modal run --detach modal_arpeggio_curriculum.py
-    """
+    
     fc1 = run_arpeggio_cd_no_onset.spawn(
         seed=seed, name=f"arpeggio-cd-no-onset-seed{seed}")
     fc2 = run_arpeggio_cd_onset.spawn(
@@ -251,9 +222,3 @@ def main(seed: int = 42, onset_alpha: float = 0.1, onset_sigma: float = 2.0):
     fc4 = run_arpeggio_eb_onset.spawn(
         seed=seed, onset_alpha=onset_alpha, onset_sigma=onset_sigma,
         name=f"arpeggio-eb-onset-a{onset_alpha}-seed{seed}")
-
-    print(f"Spawned 4 arpeggio curriculum experiments (seed={seed}).")
-    print(f"  C/D arpeggio, no onset:  {fc1.object_id}")
-    print(f"  C/D arpeggio + onset:    {fc2.object_id}")
-    print(f"  Eb/F arpeggio, no onset: {fc3.object_id}")
-    print(f"  Eb/F arpeggio + onset:   {fc4.object_id}")

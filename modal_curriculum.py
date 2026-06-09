@@ -1,16 +1,3 @@
-"""
-Modal deployment for scale pretraining + NocturneRousseau fine-tuning experiment.
-
-This runs the two-phase training:
-1. Pretrain on scales (C Major, D Major - one and two hands)
-2. Fine-tune on NocturneRousseau
-
-Usage:
-    modal run modal_curriculum.py                          # pretrain experiment (default)
-    modal run modal_curriculum.py --experiment baseline    # baseline only
-    modal run modal_curriculum.py --experiment both        # both in parallel
-"""
-
 import modal
 import subprocess
 
@@ -101,7 +88,7 @@ def train_curriculum(
     image=image,
     volumes={"/output": volume},
     gpu="T4",
-    timeout=86400,  # 24 hours (Modal maximum)
+    timeout=86400,  # 24 hours which is Modal maximum
     secrets=[wandb_secret],
 )
 def train_baseline(
@@ -109,7 +96,6 @@ def train_baseline(
     seed: int = 42,
     name: str = "baseline-nocturne-no-pretrain",
 ):
-    """Train baseline without pretraining for comparison."""
     import os
     os.chdir("/root/robopianist-rl")
 
@@ -144,17 +130,6 @@ async def main(
     finetune_steps: int = 500_000,
     seed: int = 42,
 ):
-    """
-    Run experiments.
-
-    Args:
-        experiment: "curriculum" for scale pretraining experiment,
-                   "baseline" for no-pretraining baseline,
-                   "both" to run both in parallel
-        pretrain_steps: Number of steps for pretraining phase
-        finetune_steps: Number of steps for fine-tuning phase
-        seed: Random seed
-    """
     import asyncio
     total_steps = pretrain_steps + finetune_steps
 

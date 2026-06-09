@@ -1,14 +1,3 @@
-"""
-Curriculum experiments with Eb major scale pretraining (shift=3 semitones).
-
-The Nocturne is in Eb major, so this tests whether key-matched pretraining
-helps more than the mismatched C/D major scales in modal_experiments.py.
-Runs both curriculum conditions (with and without onset reward) in parallel.
-
-Usage:
-    modal run modal_eb_curriculum.py
-"""
-
 import modal
 import subprocess
 import threading
@@ -91,7 +80,6 @@ def run_eb_curriculum(
     seed: int = 42,
     name: str = "",
 ):
-    """Eb major scale pretraining, no onset reward."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -129,7 +117,6 @@ def run_eb_curriculum_onset(
     onset_sigma: float = 2.0,
     name: str = "",
 ):
-    """Eb major scale pretraining with onset-alignment reward."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -167,12 +154,7 @@ def main(
     onset_alpha: float = 0.1,
     onset_sigma: float = 2.0,
 ):
-    """
-    Spawn both Eb-curriculum experiments in parallel and exit immediately.
-    Use `modal run --detach modal_eb_curriculum.py`.
-
-    Each run auto-retries on GPU preemption and resumes from checkpoints.
-    """
+    
     fc1 = run_eb_curriculum.spawn(
         pretrain_steps=pretrain_steps,
         finetune_steps=finetune_steps,
@@ -187,6 +169,4 @@ def main(
         onset_sigma=onset_sigma,
         name=f"eb-curriculum-onset-a{onset_alpha}-seed{seed}",
     )
-    print(f"Spawned 2 Eb-curriculum experiments in parallel (seed={seed}).")
-    print(f"  eb-curriculum (no onset): {fc1.object_id}")
-    print(f"  eb-curriculum + onset:    {fc2.object_id}")
+ 

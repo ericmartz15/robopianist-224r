@@ -1,14 +1,3 @@
-"""
-Training script: scale pretraining + NocturneRousseau fine-tuning,
-with temporal onset-alignment reward shaping and robust mid-run checkpointing.
-
-Combines onset-alignment reward (J. Choo) with phase-aware checkpoint/resume
-so Modal worker preemptions are handled automatically.
-
-Usage:
-    python train_curriculum_onset.py --pretrain_steps 100000 --finetune_steps 400000
-"""
-
 from pathlib import Path
 from typing import Optional, Tuple, List
 import tyro
@@ -86,13 +75,12 @@ class Args:
     action_reward_observation: bool = False
     agent_config: sac.SACConfig = field(default_factory=sac.SACConfig)
     scale_switch_interval: int = 50_000
-    pretrain_shift: int = 0        # semitone shift applied during pretraining (0=C/D, 3=Eb/F)
+    pretrain_shift: int = 0 
     clear_replay_on_finetune: bool = True
     finetune_warmstart_steps: int = 1_000
     checkpoint_interval: int = 10_000
-    # Onset-alignment hyperparameters
-    onset_alpha: float = 0.1   # weight of onset bonus relative to F1 reward
-    onset_sigma: float = 2.0   # timing tolerance in timesteps (1σ = sigma * control_timestep s)
+    onset_alpha: float = 0.1
+    onset_sigma: float = 2.0 
 
 
 def prefix_dict(prefix: str, d: dict) -> dict:
@@ -100,7 +88,6 @@ def prefix_dict(prefix: str, d: dict) -> dict:
 
 
 def get_onset_wrapper(env):
-    """Traverse the wrapper stack to find the OnsetAlignmentWrapper."""
     e = env
     while hasattr(e, "_environment"):
         if isinstance(e, OnsetAlignmentWrapper):
@@ -114,7 +101,7 @@ def get_env(
     args: Args,
     seed: int,
     record_dir: Optional[Path] = None,
-    shift: Optional[int] = None,  # overrides args.shift_factor when provided
+    shift: Optional[int] = None,
 ):
     effective_shift = shift if shift is not None else args.shift_factor
 
@@ -133,9 +120,6 @@ def get_env(
         change_color_on_activation=True,
     )
 
-    # Arpeggio environments are not in the suite registry. Instantiate directly
-    # from the in-memory MidiFile to preserve fingering `part` values — saving
-    # to .mid and reloading loses them, causing a 10-dim observation mismatch.
     if environment_name in ARPEGGIO_GENERATORS:
         env = make_arpeggio_env(
             name=environment_name,
@@ -152,8 +136,6 @@ def get_env(
             task_kwargs=task_kwargs,
         )
 
-    # Temporal onset-alignment bonus. Must wrap the raw environment before any
-    # other wrappers so we can still access env.task.piano.activation.
     env = OnsetAlignmentWrapper(
         env,
         env.task._midi.seq,
@@ -198,7 +180,6 @@ def save_checkpoint(
     pretrain_steps_done: int,
     finetune_steps_done: int,
 ) -> None:
-    """Atomically save agent + training state. Atomic write prevents corruption on preemption."""
     checkpoint = {
         "actor_params": agent.actor.params,
         "critic_params": agent.critic.params,
@@ -217,7 +198,6 @@ def save_checkpoint(
 
 
 def load_checkpoint(agent: sac.SAC, path: Path):
-    """Load agent + training state. Returns (agent, phase, pretrain_done, finetune_done)."""
     with open(path, "rb") as f:
         checkpoint = pickle.load(f)
     agent = agent.replace(
@@ -249,7 +229,6 @@ def train_phase(
     resume_from: int = 0,
     save_fn=None,
 ) -> sac.SAC:
-    """Run a training phase, optionally resuming mid-phase from resume_from steps."""
     timestep = env.reset()
     replay_buffer.insert(timestep, None)
 
@@ -270,7 +249,6 @@ def train_phase(
         timestep = env.step(action)
         replay_buffer.insert(timestep, action)
 
-        # Track onset bonus for per-episode logging.
         if onset_wrapper is not None:
             episode_onset_bonus += onset_wrapper.last_bonus
             episode_steps += 1
@@ -307,7 +285,6 @@ def train_phase(
             wandb.log({f"{phase_name}/video": video, "global_step": global_step})
             eval_env.latest_filename.unlink()
 
-        # Save checkpoint every checkpoint_interval steps.
         if save_fn is not None and i % args.checkpoint_interval == 0:
             save_fn(agent, i)
 
@@ -327,12 +304,9 @@ def pretrain_on_scales(
     checkpoint_path: Path,
     resume_pretrain_steps: int = 0,
 ) -> sac.SAC:
-    """Pretrain on scale environments, cycling through them. Supports mid-run resume."""
-    print("\n" + "=" * 60)
-    print("PHASE 1: PRETRAINING ON SCALES")
+    print("PRETRAINING ON SCALES")
     if resume_pretrain_steps > 0:
         print(f"Resuming from step {resume_pretrain_steps}")
-    print("=" * 60)
 
     num_scales = len(args.scale_environments)
     steps_per_scale = args.scale_switch_interval
@@ -349,17 +323,13 @@ def pretrain_on_scales(
 
             segment_end = current_step + steps_this_round
 
-            # Skip segments already fully completed before a preemption.
+            # skip segments already fully completed before a preemption
             if segment_end <= resume_pretrain_steps:
                 print(f"Skipping completed segment: {current_step} -> {segment_end}")
                 current_step = segment_end
                 continue
 
-            # Partial resume within this segment.
             steps_already_done = max(0, resume_pretrain_steps - current_step)
-
-            print(f"\nCycle {cycle + 1}, Scale: {scale_env_name}")
-            print(f"Training steps {steps_already_done + 1} -> {steps_this_round} (global: {current_step + steps_already_done} -> {segment_end})")
 
             env = get_env(scale_env_name, args, args.seed + scale_idx,
                           shift=args.pretrain_shift)
@@ -373,7 +343,7 @@ def pretrain_on_scales(
 
             warmstart = args.warmstart_steps if (current_step == 0 and steps_already_done == 0) else 0
 
-            seg_start = current_step  # capture loop var for closure
+            seg_start = current_step  
 
             def make_save_fn(captured_seg_start):
                 def save_fn(a, steps_in_seg):
@@ -415,12 +385,10 @@ def finetune_on_target(
     checkpoint_path: Path,
     resume_finetune_steps: int = 0,
 ) -> sac.SAC:
-    """Fine-tune on NocturneRousseau. Supports mid-run resume."""
-    print("\n" + "=" * 60)
-    print("PHASE 2: FINE-TUNING ON TARGET (NocturneRousseau)")
+
+    print("FINE-TUNING ON NOCTURNE")
     if resume_finetune_steps > 0:
         print(f"Resuming from step {resume_finetune_steps}")
-    print("=" * 60)
 
     # Only clear replay buffer when starting the finetune phase fresh.
     if resume_finetune_steps == 0 and args.clear_replay_on_finetune:
@@ -497,7 +465,6 @@ def main(args: Args) -> None:
         resume="allow",
     )
 
-    print("Initializing agent with target environment spec...")
     init_env = get_env(args.target_environment, args, args.seed)
     spec = specs.EnvironmentSpec.make(init_env)
 
@@ -515,7 +482,7 @@ def main(args: Args) -> None:
         batch_size=args.batch_size,
     )
 
-    # Resume from checkpoint if one exists.
+    # resume from checkpoint if one exists
     checkpoint_path = experiment_dir / "checkpoint.pkl"
     phase = "pretrain"
     pretrain_done = 0
@@ -524,7 +491,6 @@ def main(args: Args) -> None:
     if checkpoint_path.exists():
         agent, phase, pretrain_done, finetune_done = load_checkpoint(agent, checkpoint_path)
 
-    # Route to the correct phase.
     if phase == "pretrain":
         agent = pretrain_on_scales(
             agent=agent,
@@ -545,11 +511,7 @@ def main(args: Args) -> None:
         checkpoint_path=checkpoint_path,
         resume_finetune_steps=finetune_done,
     )
-
-    print("\n" + "=" * 60)
     print("TRAINING COMPLETE")
-    print(f"Checkpoints saved to: {experiment_dir}")
-    print("=" * 60)
 
 
 if __name__ == "__main__":

@@ -1,18 +1,3 @@
-"""
-Sweep over onset reward weighting (alpha) for the no-curriculum + onset condition.
-
-Reuses run_onset_only from modal_experiments.py image/volume/secret.
-We already have alpha=0.1 (onset-only-a0.1-seed42, F1=0.589).
-This sweep covers a range around that to find the optimal weighting.
-
-Alpha values: 0.01, 0.05, 0.1 (existing), 0.25, 0.5
-Each run: 500k steps, no pretraining, same hyperparameters as the 2x2 experiment.
-
-Usage:
-    modal run --detach modal_alpha_sweep.py
-    modal run --detach modal_alpha_sweep.py --skip-existing  # skip alpha=0.1
-"""
-
 import modal
 import subprocess
 import threading
@@ -91,7 +76,6 @@ def _run(cmd: list, vol: modal.Volume) -> None:
 
 @app.function(**_fn_kwargs)
 def run_onset_sweep(onset_alpha: float, seed: int = 42):
-    """500k steps, no curriculum, onset reward with given alpha."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -123,22 +107,16 @@ def run_onset_sweep(onset_alpha: float, seed: int = 42):
 
 @app.local_entrypoint()
 def main(seed: int = 42, skip_existing: bool = True):
-    """
-    Sweep onset_alpha over [0.01, 0.05, 0.1, 0.25, 0.5].
-    skip_existing=True (default) skips alpha=0.1 since we already have that run.
-    """
     alphas = [0.01, 0.05, 0.1, 0.25, 0.5]
 
     if skip_existing:
         alphas = [a for a in alphas if a != 0.1]
-        print("Skipping alpha=0.1 (already have onset-only-a0.1-seed42).")
 
     handles = {}
     for alpha in alphas:
         fc = run_onset_sweep.spawn(onset_alpha=alpha, seed=seed)
         handles[alpha] = fc.object_id
 
-    print(f"Spawned {len(alphas)} sweep runs (seed={seed}):")
     for alpha, fid in handles.items():
         print(f"  onset_alpha={alpha:<5}  {fid}")
-    print("\nCompare in WandB: finetune/eval/f1 across all onset-only-a*-seed42 runs.")
+    

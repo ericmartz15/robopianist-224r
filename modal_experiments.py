@@ -1,16 +1,3 @@
-"""
-Unified experiment runner — all four 500k-compute experiments in parallel.
-
-2x2 design (identical hyperparameters, same total compute budget):
-                     no onset reward    onset reward
-  no curriculum      baseline           onset-only
-  curriculum         curriculum         curriculum+onset
-
-Usage:
-    modal run modal_experiments.py              # all four, seed=42
-    modal run modal_experiments.py --seed 1     # different seed
-"""
-
 import modal
 import subprocess
 import threading
@@ -33,7 +20,7 @@ image = (
     )
     .env({
         "MUJOCO_GL": "egl",
-        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",  # match run.sh; prevents JAX pre-allocating all GPU memory
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false", 
     })
     .run_commands(
         "git clone https://github.com/kevinzakka/robopianist-rl /root/robopianist-rl",
@@ -46,10 +33,6 @@ image = (
         "flax==0.7.5",
         "optax==0.1.7",
         "distrax==0.1.5",
-        # Pin mujoco + dm-control together: dm-control>=1.0.40 references
-        # flex_bandwidth which was removed in mujoco 3.9.0, causing an
-        # AttributeError at environment init. 1.0.39 is the last safe version;
-        # it requires mujoco>=3.7.0 and was designed for that combination.
         "mujoco==3.7.0",
         "dm-control==1.0.39",
         "robopianist>=1.0.6",
@@ -66,7 +49,6 @@ image = (
 volume = modal.Volume.from_name("robopianist-results", create_if_missing=True)
 wandb_secret = modal.Secret.from_name("wandb")
 
-# Shared decorator kwargs — all four experiments use identical infrastructure.
 _fn_kwargs = dict(
     image=image,
     volumes={"/output": volume},
@@ -78,8 +60,6 @@ _fn_kwargs = dict(
 
 
 def _run(cmd: list, vol: modal.Volume) -> None:
-    """Run a training subprocess and commit the volume every 5 min so
-    checkpoints survive GPU preemption between explicit retries."""
     proc = subprocess.Popen(cmd)
 
     def _commit_loop():
@@ -94,15 +74,12 @@ def _run(cmd: list, vol: modal.Volume) -> None:
     vol.commit()
 
 
-# ── Experiment 1: Baseline ────────────────────────────────────────────────────
+# Baseline 
 
 _DEFAULT_TARGET = "RoboPianist-debug-NocturneRousseau-v0"
 
 
 def _piece_label(target: str) -> str:
-    """Extract a short label from an environment name for use in run names.
-    e.g. 'RoboPianist-etude-12-PianoSonataK279InCMajor1stMov1-v0' -> 'PianoSonataK279InCMajor1stMov1'
-    """
     return target.removesuffix("-v0").split("-")[-1]
 
 
@@ -113,7 +90,6 @@ def run_baseline(
     name: str = "",
     target: str = _DEFAULT_TARGET,
 ):
-    """No curriculum, no onset reward."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -143,7 +119,7 @@ def run_baseline(
     ], volume)
 
 
-# ── Experiment 2: Curriculum (no onset reward) ────────────────────────────────
+# Curriculum but no onset
 
 @app.function(**_fn_kwargs)
 def run_curriculum(
@@ -181,7 +157,7 @@ def run_curriculum(
     ], volume)
 
 
-# ── Experiment 3: Onset reward only (no curriculum) ──────────────────────────
+# Onset reward but no curriculum
 
 @app.function(**_fn_kwargs)
 def run_onset_only(
@@ -192,7 +168,6 @@ def run_onset_only(
     name: str = "",
     target: str = _DEFAULT_TARGET,
 ):
-    """500k steps with onset reward, no scale pretraining."""
     import os
     os.chdir("/root/robopianist-rl")
     _run([
@@ -223,7 +198,7 @@ def run_onset_only(
     ], volume)
 
 
-# ── Experiment 4: Curriculum + temporal onset reward ─────────────────────────
+# Curriculum and onset reward
 
 @app.function(**_fn_kwargs)
 def run_curriculum_onset(
@@ -263,9 +238,6 @@ def run_curriculum_onset(
         "--onset_sigma", str(onset_sigma),
     ], volume)
 
-
-# ── Entrypoint ────────────────────────────────────────────────────────────────
-
 @app.local_entrypoint()
 def main(
     seed: int = 42,
@@ -273,20 +245,6 @@ def main(
     onset_sigma: float = 2.0,
     target: str = _DEFAULT_TARGET,
 ):
-    """
-    Spawn all four 500k-compute experiments in parallel. Returns immediately.
-    Each run auto-retries on GPU preemption, resuming from its last checkpoint.
-
-    2x2 design:
-                       no onset reward    onset reward
-      no curriculum    baseline           onset-only
-      curriculum       curriculum         curriculum+onset
-
-    Use --target to run on a different piece, e.g.:
-        modal run --detach modal_experiments.py --target RoboPianist-etude-12-PianoSonataK279InCMajor1stMov1-v0
-
-    Monitor progress at https://wandb.ai/
-    """
     piece = _piece_label(target)
     fc1 = run_baseline.spawn(
         max_steps=500_000,
@@ -318,9 +276,4 @@ def main(
         target=target,
         name=f"curriculum-onset-{piece}-a{onset_alpha}-seed{seed}",
     )
-    print(f"Spawned 4 experiments (piece={piece}, seed={seed}, onset_alpha={onset_alpha}).")
-    print(f"  baseline:              {fc1.object_id}")
-    print(f"  onset only:            {fc2.object_id}")
-    print(f"  curriculum (no onset): {fc3.object_id}")
-    print(f"  curriculum + onset:    {fc4.object_id}")
-    print("All runs will auto-retry on preemption and resume from checkpoints.")
+ 
